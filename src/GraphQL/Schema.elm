@@ -1,4 +1,4 @@
-module GraphQL.Schema exposing (..)
+module GraphQL.Schema exposing (Directive, DirectiveLocation(..), EnumTypeInfo, EnumValue, Field, InputObjectTypeInfo, InputValue, InterfaceTypeInfo, NamedType(..), ObjectTypeInfo, ScalarTypeInfo, Schema, TypeRef(..), UnionTypeInfo)
 
 import Dict exposing (Dict)
 
