@@ -61,42 +61,6 @@ defaultRequestOptions url =
     }
 
 
-type alias RequestConfig msg =
-    { method : String
-    , headers : List Http.Header
-    , url : String
-    , body : Http.Body
-    , expect : Http.Expect msg
-    , timeout : Maybe Float
-    , tracker : Maybe String
-    }
-
-
-requestConfig :
-    RequestOptions
-    -> String
-    -> Http.Expect a
-    -> Maybe Json.Encode.Value
-    -> RequestConfig a
-requestConfig requestOptions documentString expect variableValues =
-    let
-        ( url, body ) =
-            if requestOptions.method == "GET" then
-                ( Util.parameterizedUrl requestOptions.url documentString variableValues, Http.emptyBody )
-
-            else
-                ( requestOptions.url, Util.postBody documentString variableValues )
-    in
-    { method = requestOptions.method
-    , headers = requestOptions.headers
-    , url = url
-    , body = body
-    , expect = expect
-    , timeout = requestOptions.timeout
-    , tracker = requestOptions.tracker
-    }
-
-
 {-| Takes a URL and a `Query` `Request` and returns a `Task` that you can perform with `Task.attempt` which will send a `POST` request to a GraphQL server at the given endpoint.
 -}
 sendQuery :
@@ -204,3 +168,39 @@ expectGraphQL toMsg request =
 
                         Err err ->
                             Err (HttpError (Http.BadBody (Json.Decode.errorToString err)))
+
+
+type alias RequestConfig msg =
+    { method : String
+    , headers : List Http.Header
+    , url : String
+    , body : Http.Body
+    , expect : Http.Expect msg
+    , timeout : Maybe Float
+    , tracker : Maybe String
+    }
+
+
+requestConfig :
+    RequestOptions
+    -> String
+    -> Http.Expect a
+    -> Maybe Json.Encode.Value
+    -> RequestConfig a
+requestConfig requestOptions documentString expect variableValues =
+    let
+        ( url, body ) =
+            if requestOptions.method == "GET" then
+                ( Util.parameterizedUrl requestOptions.url documentString variableValues, Http.emptyBody )
+
+            else
+                ( requestOptions.url, Util.postBody documentString variableValues )
+    in
+    { method = requestOptions.method
+    , headers = requestOptions.headers
+    , url = url
+    , body = body
+    , expect = expect
+    , timeout = requestOptions.timeout
+    , tracker = requestOptions.tracker
+    }
