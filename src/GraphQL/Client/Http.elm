@@ -42,44 +42,49 @@ graphQLValue request =
     { query = Builder.requestBody request, variables = Builder.jsonVariableValues request }
 
 
-createResult : data -> List RequestError -> Result data
-createResult data errors =
-    case errors of
-        [] ->
-            GraphQLSucces data
+parseBody : Decoder data -> String -> Result data
+parseBody dataDecoder body =
+    let
+        dataRes =
+            Decode.decodeString (Decode.field "data" dataDecoder) body
 
-        _ ->
-            GraphQLErrors errors data
+        errors =
+            body
+                |> Decode.decodeString (Decode.field "errors" GraphQL.Response.errorsDecoder)
+                |> Result.toMaybe
+                |> Maybe.withDefault []
+    in
+    case ( dataRes, errors ) of
+        ( Ok data, [] ) ->
+            Success data
 
+        ( Ok data, gqlErrors ) ->
+            SuccessWithErrors gqlErrors data
 
-graphQLErrorsDecoder : Decoder (List RequestError)
-graphQLErrorsDecoder =
-    Decode.oneOf
-        [ Decode.field "errors" GraphQL.Response.errorsDecoder
-        , Decode.succeed []
-        ]
+        ( Err decoderError, [] ) ->
+            HttpError (Http.BadBody <| Decode.errorToString decoderError)
 
-
-graphQLDecoder : Decoder data -> Decoder (Result data)
-graphQLDecoder dataDecoder =
-    Decode.map2 createResult
-        (Decode.field "data" dataDecoder)
-        graphQLErrorsDecoder
-
-
-extractResult : Result.Result Http.Error (Result data) -> Result data
-extractResult result =
-    case result of
-        Err err ->
-            HttpError err
-
-        Ok res ->
-            res
+        ( Err decoderError, gqlErrors ) ->
+            DecoderError gqlErrors decoderError
 
 
 graphQLExpect : (Result data -> msg) -> Builder.Request operationType data -> Http.Expect msg
 graphQLExpect tagger request =
-    Http.expectJson (extractResult >> tagger) (graphQLDecoder <| Builder.responseDataDecoder request)
+    let
+        dataDecoder : Decoder data
+        dataDecoder =
+            Builder.responseDataDecoder request
+
+        parser : Result.Result Http.Error String -> Result data
+        parser result =
+            case result of
+                Ok body ->
+                    parseBody dataDecoder body
+
+                Err err ->
+                    HttpError err
+    in
+    Http.expectString (parser >> tagger)
 
 
 {-| An error returned by the GraphQL server that indicates there was something wrong with the request.
@@ -101,8 +106,9 @@ type alias DocumentLocation =
 {-| Represents errors that can occur when sending a GraphQL request over HTTP.
 -}
 type Result data
-    = GraphQLSucces data
-    | GraphQLErrors (List RequestError) data
+    = Success data
+    | SuccessWithErrors (List RequestError) data
+    | DecoderError (List RequestError) Decode.Error
     | HttpError Http.Error
 
 

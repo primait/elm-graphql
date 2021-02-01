@@ -5,6 +5,7 @@ import GraphQL.Client.Http as GraphQLClient
 import GraphQL.Request.Builder exposing (..)
 import GraphQL.Request.Builder.Arg as Arg
 import GraphQL.Request.Builder.Variable as Var
+import GraphQL.Response
 import Html exposing (Html, div, text)
 import Http
 import Task exposing (Task)
@@ -102,27 +103,32 @@ connectionNodes spec =
         )
 
 
-type alias Model =
-    Maybe FilmSummary
+type Model
+    = Resp FilmSummary
+    | Errors String
+    | Loading
 
 
 type Msg
-    = ReceiveQueryResponse FilmSummary
-    | ReceiveQueryError
+    = QueryResponse FilmSummary
+    | GraphQLErrors (List GraphQL.Response.RequestError)
+    | HttpError Http.Error
 
 
 graphQLToMsg : GraphQLClient.Result FilmSummary -> Msg
 graphQLToMsg result =
     case result of
-        GraphQLClient.GraphQLSucces data ->
-            ReceiveQueryResponse data
+        GraphQLClient.Success data ->
+            QueryResponse data
 
-        -- Explicitly ignoring GraphQL data
-        GraphQLClient.GraphQLErrors _ _ ->
-            ReceiveQueryError
+        GraphQLClient.SuccessWithErrors _ data ->
+            QueryResponse data
 
-        GraphQLClient.HttpError _ ->
-            ReceiveQueryError
+        GraphQLClient.DecoderError err _ ->
+            GraphQLErrors err
+
+        GraphQLClient.HttpError err ->
+            HttpError err
 
 
 sendQueryRequest : Request Query FilmSummary -> Cmd Msg
@@ -142,15 +148,28 @@ main =
 
 init : () -> ( Model, Cmd Msg )
 init () =
-    ( Nothing, sendQueryRequest starWarsRequest )
+    ( Loading, sendQueryRequest starWarsRequest )
 
 
 view : Model -> Browser.Document Msg
 view model =
     { title = "Example"
     , body =
-        [ Maybe.map viewFilmSummary model |> Maybe.withDefault (Html.text "Nothing") ]
+        [ viewModel model ]
     }
+
+
+viewModel : Model -> Html Msg
+viewModel model =
+    case model of
+        Loading ->
+            Html.text "Loading..."
+
+        Errors e ->
+            Html.text ("Oh no! I got this error " ++ e)
+
+        Resp r ->
+            viewFilmSummary r
 
 
 viewFilmSummary : FilmSummary -> Html Msg
@@ -186,11 +205,33 @@ viewNameList names =
         |> Html.text
 
 
+httpErrorToString : Http.Error -> String
+httpErrorToString error =
+    case error of
+        Http.BadUrl err ->
+            "Bad url: " ++ err
+
+        Http.Timeout ->
+            "Timeout"
+
+        Http.NetworkError ->
+            "Network error"
+
+        Http.BadStatus code ->
+            "Bad status code: " ++ String.fromInt code
+
+        Http.BadBody err ->
+            "Bad body: " ++ err
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        ReceiveQueryResponse data ->
-            ( Just data, Cmd.none )
+        QueryResponse data ->
+            ( Resp data, Cmd.none )
 
-        ReceiveQueryError ->
-            ( Nothing, Cmd.none )
+        GraphQLErrors gqlErrors ->
+            ( gqlErrors |> List.map .message |> String.join ", " |> Errors, Cmd.none )
+
+        HttpError err ->
+            ( err |> httpErrorToString |> Errors, Cmd.none )
