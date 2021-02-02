@@ -1,26 +1,90 @@
-module GraphQL.Client.Http
-    exposing
-        ( RequestError
-        , DocumentLocation
-        , Error(..)
-        , RequestOptions
-        , sendQuery
-        , sendMutation
-        , customSendQuery
-        , customSendQueryRaw
-        , customSendMutation
-        , customSendMutationRaw
-        )
+module GraphQL.Client.Http exposing
+    ( RequestError, DocumentLocation, sendQuery, sendMutation, RequestOptions, customSendQuery, customSendMutation
+    , Result(..), graphQLValue
+    )
 
 {-| The functions in this module let you perform HTTP requests to conventional GraphQL server endpoints.
 
-@docs Error, RequestError, DocumentLocation, sendQuery, sendMutation, RequestOptions,  customSendQuery, customSendMutation, customSendQueryRaw, customSendMutationRaw
+@docs Error, RequestError, DocumentLocation, sendQuery, sendMutation, RequestOptions, customSendQuery, customSendMutation, customSendQueryRaw, customSendMutationRaw
+
 -}
 
 import GraphQL.Client.Http.Util as Util
 import GraphQL.Request.Builder as Builder
+import GraphQL.Response
 import Http
-import Task exposing (Task)
+import Json.Decode as Decode exposing (Decoder)
+import Json.Encode as Encode
+
+
+graphQLBodyWith : List ( String, Encode.Value ) -> Builder.Request operationType result -> Http.Body
+graphQLBodyWith extraFields request =
+    let
+        documentString =
+            Builder.requestBody request
+
+        variableValues =
+            Builder.jsonVariableValues request
+
+        postBody =
+            Util.postBodyJsonWith extraFields documentString variableValues
+    in
+    Http.stringBody "application/json" <| Encode.encode 0 postBody
+
+
+graphQLBody : Builder.Request operationType result -> Http.Body
+graphQLBody =
+    graphQLBodyWith []
+
+
+graphQLValue : Builder.Request operationType result -> { query : String, variables : Maybe Encode.Value }
+graphQLValue request =
+    { query = Builder.requestBody request, variables = Builder.jsonVariableValues request }
+
+
+parseBody : Decoder data -> String -> Result data
+parseBody dataDecoder body =
+    let
+        dataRes =
+            Decode.decodeString (Decode.field "data" dataDecoder) body
+
+        errors =
+            body
+                |> Decode.decodeString (Decode.field "errors" GraphQL.Response.errorsDecoder)
+                |> Result.toMaybe
+                |> Maybe.withDefault []
+    in
+    case ( dataRes, errors ) of
+        ( Ok data, [] ) ->
+            Success data
+
+        ( Ok data, gqlErrors ) ->
+            SuccessWithErrors gqlErrors data
+
+        ( Err decoderError, [] ) ->
+            HttpError (Http.BadBody <| Decode.errorToString decoderError)
+
+        ( Err decoderError, gqlErrors ) ->
+            DecoderError gqlErrors decoderError
+
+
+graphQLExpect : (Result data -> msg) -> Builder.Request operationType data -> Http.Expect msg
+graphQLExpect tagger request =
+    let
+        dataDecoder : Decoder data
+        dataDecoder =
+            Builder.responseDataDecoder request
+
+        parser : Result.Result Http.Error String -> Result data
+        parser result =
+            case result of
+                Ok body ->
+                    parseBody dataDecoder body
+
+                Err err ->
+                    HttpError err
+    in
+    Http.expectString (parser >> tagger)
 
 
 {-| An error returned by the GraphQL server that indicates there was something wrong with the request.
@@ -41,37 +105,31 @@ type alias DocumentLocation =
 
 {-| Represents errors that can occur when sending a GraphQL request over HTTP.
 -}
-type Error
-    = HttpError Http.Error
-    | GraphQLError (List RequestError)
+type Result data
+    = Success data
+    | SuccessWithErrors (List RequestError) data
+    | DecoderError (List RequestError) Decode.Error
+    | HttpError Http.Error
 
 
 {-| Takes a URL and a `Query` `Request` and returns a `Task` that you can perform with `Task.attempt` which will send a `POST` request to a GraphQL server at the given endpoint.
 -}
 sendQuery :
     String
-    -> Builder.Request Builder.Query result
-    -> Task Error result
+    -> (Result data -> msg)
+    -> Builder.Request Builder.Query data
+    -> Cmd msg
 sendQuery =
     Util.defaultRequestOptions >> send
-
-
-{-| Takes a URL and a `Query` `Request` and returns a `Task` that you can perform with `Task.attempt` which will send a `POST` request to a GraphQL server at the given endpoint and return raw `Http.Response` in Task.
--}
-sendQueryRaw :
-    String
-    -> Builder.Request Builder.Query result
-    -> Task Error (Http.Response String)
-sendQueryRaw =
-    Util.defaultRequestOptions >> sendExpecting rawExpect
 
 
 {-| Takes a URL and a `Mutation` `Request` and returns a `Task` that you can perform with `Task.attempt` which will send a `POST` request to a GraphQL server at the given endpoint.
 -}
 sendMutation :
     String
-    -> Builder.Request Builder.Mutation result
-    -> Task Error result
+    -> (Result data -> msg)
+    -> Builder.Request Builder.Mutation data
+    -> Cmd msg
 sendMutation =
     Util.defaultRequestOptions >> send
 
@@ -80,10 +138,11 @@ sendMutation =
 -}
 sendMutationRaw :
     String
-    -> Builder.Request Builder.Mutation result
-    -> Task Error (Http.Response String)
-sendMutationRaw =
-    Util.defaultRequestOptions >> sendExpecting rawExpect
+    -> (Result data -> msg)
+    -> Builder.Request Builder.Mutation data
+    -> Cmd msg
+sendMutationRaw url tagger request =
+    send (Util.defaultRequestOptions url) tagger request
 
 
 {-| Options available for customizing GraphQL HTTP requests. `method` should be either `"GET"` or `"POST"`. For `GET` requests, the `url` is modified to include extra parameters in the query string for the GraphQL document and variables. Otherwise, the document and variables are included in the HTTP request body.
@@ -93,6 +152,7 @@ type alias RequestOptions =
     , headers : List Http.Header
     , url : String
     , timeout : Maybe Float
+    , tracker : Maybe String
     , withCredentials : Bool
     }
 
@@ -101,132 +161,43 @@ type alias RequestOptions =
 -}
 customSendQuery :
     RequestOptions
-    -> Builder.Request Builder.Query result
-    -> Task Error result
+    -> (Result data -> msg)
+    -> Builder.Request Builder.Query data
+    -> Cmd msg
 customSendQuery =
     send
-
-
-{-| Like `sendQuery`, but takes an `RequestOptions` value instead of a URL to let you further customize the HTTP request. You will get a plain `Http.Response` as Task result.
-
-Useful for things like caching, custom errors decoding, etc.
-
-Example of response decoding:
-
-    let
-        decoder =
-            GraphQL.Request.Builder.responseDataDecoder request
-                |> Json.Decode.field "data"
-
-        options =
-            { method = "GET"
-            , headers = []
-            , url = "/graphql"
-            , timeout = Nothing
-            , withCredentials = False
-            }
-    in
-        request
-            |> GraphQL.Client.Http.customSendQueryRaw options
-            |> Task.andThen
-                (\response ->
-                    case Json.Decode.decodeString decoder response.body of
-                        Err err ->
-                            Task.fail <| GraphQL.Client.Http.HttpError <| Http.BadPayload err response
-
-                        Ok decodedValue ->
-                            Task.succeed decodedValue
-                )
--}
-customSendQueryRaw :
-    RequestOptions
-    -> Builder.Request Builder.Query result
-    -> Task Error (Http.Response String)
-customSendQueryRaw =
-    sendExpecting rawExpect
 
 
 {-| Like `sendMutation`, but takes an `RequestOptions` value instead of a URL to let you further customize the HTTP request.
 -}
 customSendMutation :
     RequestOptions
-    -> Builder.Request Builder.Mutation result
-    -> Task Error result
+    -> (Result data -> msg)
+    -> Builder.Request Builder.Mutation data
+    -> Cmd msg
 customSendMutation =
     send
 
 
-{-| Like `sendMutation`, but takes an `RequestOptions` value instead of a URL to let you further customize the HTTP request. You will get a plain `Http.Response` as Task result.
-
-Useful for things like custom errors decoding, etc.
-
-Example of response decoding:
-
-    let
-        decoder =
-            GraphQL.Request.Builder.responseDataDecoder mutationRequest
-                |> Json.Decode.field "data"
-
-        options =
-            { method = "GET"
-            , headers = []
-            , url = "/graphql"
-            , timeout = Nothing
-            , withCredentials = False
-            }
-    in
-        mutationRequest
-            |> GraphQL.Client.Http.customSendMutationRaw options
-            |> Task.andThen
-                (\response ->
-                    case Json.Decode.decodeString decoder response.body of
-                        Err err ->
-                            Task.fail <| GraphQL.Client.Http.HttpError <| Http.BadPayload err response
-
-                        Ok decodedValue ->
-                            Task.succeed decodedValue
-                )
-
--}
-customSendMutationRaw :
-    RequestOptions
-    -> Builder.Request Builder.Mutation result
-    -> Task Error (Http.Response String)
-customSendMutationRaw =
-    sendExpecting rawExpect
-
-
-rawExpect : Http.Expect (Http.Response String)
-rawExpect =
-    Http.expectStringResponse Ok
-
-
 send :
     RequestOptions
-    -> Builder.Request operationType result
-    -> Task Error result
-send options request =
+    -> (Result data -> msg)
+    -> Builder.Request operationType data
+    -> Cmd msg
+send options tagger request =
     let
-        expect =
-            Util.defaultExpect (Builder.responseDataDecoder request)
+        requestArgs =
+            { method = options.method
+            , headers = options.headers
+            , url = options.url
+            , body = graphQLBody request
+            , expect = graphQLExpect tagger request
+            , timeout = options.timeout
+            , tracker = options.tracker
+            }
     in
-        sendExpecting expect options request
+    if options.withCredentials then
+        Http.riskyRequest requestArgs
 
-
-sendExpecting :
-    Http.Expect result
-    -> RequestOptions
-    -> Builder.Request operationType result2
-    -> Task Error result
-sendExpecting expect requestOptions request =
-    let
-        documentString =
-            Builder.requestBody request
-
-        variableValues =
-            Builder.jsonVariableValues request
-    in
-        Util.requestConfig requestOptions documentString expect variableValues
-            |> Http.request
-            |> Http.toTask
-            |> Task.mapError (Util.convertHttpError HttpError GraphQLError)
+    else
+        Http.request requestArgs

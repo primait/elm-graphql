@@ -1,10 +1,13 @@
 module Main exposing (..)
 
-import Html exposing (Html, div, text)
+import Browser
+import GraphQL.Client.Http as GraphQLClient
 import GraphQL.Request.Builder exposing (..)
 import GraphQL.Request.Builder.Arg as Arg
 import GraphQL.Request.Builder.Variable as Var
-import GraphQL.Client.Http as GraphQLClient
+import GraphQL.Response
+import Html exposing (Html, div, text)
+import Http
 import Task exposing (Task)
 
 
@@ -19,7 +22,6 @@ type alias FilmSummary =
 
 {-| The definition of `starWarsRequest` builds up a query request value that
 will later be encoded into the following GraphQL query document:
-
 fragment filmPlanetsFragment on Film {
   planetConnection(first: $pageSize) {
     edges {
@@ -29,7 +31,6 @@ fragment filmPlanetsFragment on Film {
     }
   }
 }
-
 query ($filmID: ID!, $pageSize: Int = 3) {
   film(filmID: $filmID) {
     title
@@ -43,7 +44,6 @@ query ($filmID: ID!, $pageSize: Int = 3) {
     ...filmPlanetsFragment
   }
 }
-
 This query is sent along with variable values extracted from the record passed
 to `request`, and the response is decoded into a `FilmSummary`.
 -}
@@ -66,24 +66,24 @@ starWarsRequest =
                     )
                 )
     in
-        extract
-            (field "film"
-                [ ( "filmID", Arg.variable filmID ) ]
-                (object FilmSummary
-                    |> with (field "title" [] (nullable string))
-                    |> with
-                        (field "characterConnection"
-                            [ ( "first", Arg.variable pageSize ) ]
-                            (connectionNodes (extract (field "name" [] (nullable string))))
-                        )
-                    |> with (fragmentSpread planetsFragment)
-                )
+    extract
+        (field "film"
+            [ ( "filmID", Arg.variable filmID ) ]
+            (object FilmSummary
+                |> with (field "title" [] (nullable string))
+                |> with
+                    (field "characterConnection"
+                        [ ( "first", Arg.variable pageSize ) ]
+                        (connectionNodes (extract (field "name" [] (nullable string))))
+                    )
+                |> with (fragmentSpread planetsFragment)
             )
-            |> queryDocument
-            |> request
-                { filmID = "1"
-                , pageSize = Nothing
-                }
+        )
+        |> queryDocument
+        |> request
+            { filmID = "1"
+            , pageSize = Nothing
+            }
 
 
 {-| A function that helps you extract node objects from paginated Relay connections.
@@ -103,55 +103,135 @@ connectionNodes spec =
         )
 
 
-type alias StarWarsResponse =
-    Result GraphQLClient.Error FilmSummary
-
-
-type alias Model =
-    Maybe StarWarsResponse
+type Model
+    = Resp FilmSummary
+    | Errors String
+    | Loading
 
 
 type Msg
-    = ReceiveQueryResponse StarWarsResponse
+    = QueryResponse FilmSummary
+    | GraphQLErrors (List GraphQL.Response.RequestError)
+    | HttpError Http.Error
 
 
-sendQueryRequest : Request Query a -> Task GraphQLClient.Error a
+graphQLToMsg : GraphQLClient.Result FilmSummary -> Msg
+graphQLToMsg result =
+    case result of
+        GraphQLClient.Success data ->
+            QueryResponse data
+
+        GraphQLClient.SuccessWithErrors _ data ->
+            QueryResponse data
+
+        GraphQLClient.DecoderError err _ ->
+            GraphQLErrors err
+
+        GraphQLClient.HttpError err ->
+            HttpError err
+
+
+sendQueryRequest : Request Query FilmSummary -> Cmd Msg
 sendQueryRequest request =
-    GraphQLClient.sendQuery "/" request
+    GraphQLClient.sendQuery "/" graphQLToMsg request
 
 
-sendStarWarsQuery : Cmd Msg
-sendStarWarsQuery =
-    sendQueryRequest starWarsRequest
-        |> Task.attempt ReceiveQueryResponse
-
-
-main : Program Never Model Msg
+main : Program () Model Msg
 main =
-    Html.program
+    Browser.document
         { init = init
         , view = view
         , update = update
-        , subscriptions = subscriptions
+        , subscriptions = \_ -> Sub.none
         }
 
 
-init : ( Model, Cmd Msg )
-init =
-    ( Nothing, sendStarWarsQuery )
+init : () -> ( Model, Cmd Msg )
+init () =
+    ( Loading, sendQueryRequest starWarsRequest )
 
 
-view : Model -> Html Msg
+view : Model -> Browser.Document Msg
 view model =
-    div []
-        [ model |> toString |> text ]
+    { title = "Example"
+    , body =
+        [ viewModel model ]
+    }
+
+
+viewModel : Model -> Html Msg
+viewModel model =
+    case model of
+        Loading ->
+            Html.text "Loading..."
+
+        Errors e ->
+            Html.text ("Oh no! I got this error " ++ e)
+
+        Resp r ->
+            viewFilmSummary r
+
+
+viewFilmSummary : FilmSummary -> Html Msg
+viewFilmSummary summary =
+    Html.div []
+        [ Html.text ("Title: " ++ Maybe.withDefault "Unknown" summary.title)
+        , viewCharacterNames summary.someCharacterNames
+        , viewPlanetNames <| Maybe.withDefault [] summary.somePlanetNames
+        ]
+
+
+viewCharacterNames : List (Maybe String) -> Html Msg
+viewCharacterNames names =
+    Html.div []
+        [ Html.text "Character names: "
+        , viewNameList names
+        ]
+
+
+viewPlanetNames : List (Maybe String) -> Html Msg
+viewPlanetNames names =
+    Html.div []
+        [ Html.text "Planet names: "
+        , viewNameList names
+        ]
+
+
+viewNameList : List (Maybe String) -> Html Msg
+viewNameList names =
+    names
+        |> List.map (Maybe.withDefault " -- ")
+        |> String.join ", "
+        |> Html.text
+
+
+httpErrorToString : Http.Error -> String
+httpErrorToString error =
+    case error of
+        Http.BadUrl err ->
+            "Bad url: " ++ err
+
+        Http.Timeout ->
+            "Timeout"
+
+        Http.NetworkError ->
+            "Network error"
+
+        Http.BadStatus code ->
+            "Bad status code: " ++ String.fromInt code
+
+        Http.BadBody err ->
+            "Bad body: " ++ err
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
-update (ReceiveQueryResponse response) model =
-    ( Just response, Cmd.none )
+update msg model =
+    case msg of
+        QueryResponse data ->
+            ( Resp data, Cmd.none )
 
+        GraphQLErrors gqlErrors ->
+            ( gqlErrors |> List.map .message |> String.join ", " |> Errors, Cmd.none )
 
-subscriptions : Model -> Sub Msg
-subscriptions model =
-    Sub.none
+        HttpError err ->
+            ( err |> httpErrorToString |> Errors, Cmd.none )
