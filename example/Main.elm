@@ -1,12 +1,14 @@
 module Main exposing (..)
 
-import Html exposing (Html, div, text)
+import Browser
+import GraphQL.Client.Http as GraphQLClient
 import GraphQL.Request.Builder exposing (..)
 import GraphQL.Request.Builder.Arg as Arg
 import GraphQL.Request.Builder.Variable as Var
-import GraphQL.Client.Http as GraphQLClient
+import Html exposing (Html, div, text)
+import Http
 import Task exposing (Task)
-import Browser
+
 
 {-| Responses to `starWarsRequest` are decoded into this type.
 -}
@@ -19,7 +21,6 @@ type alias FilmSummary =
 
 {-| The definition of `starWarsRequest` builds up a query request value that
 will later be encoded into the following GraphQL query document:
-
 fragment filmPlanetsFragment on Film {
   planetConnection(first: $pageSize) {
     edges {
@@ -29,7 +30,6 @@ fragment filmPlanetsFragment on Film {
     }
   }
 }
-
 query ($filmID: ID!, $pageSize: Int = 3) {
   film(filmID: $filmID) {
     title
@@ -43,7 +43,6 @@ query ($filmID: ID!, $pageSize: Int = 3) {
     ...filmPlanetsFragment
   }
 }
-
 This query is sent along with variable values extracted from the record passed
 to `request`, and the response is decoded into a `FilmSummary`.
 -}
@@ -66,24 +65,24 @@ starWarsRequest =
                     )
                 )
     in
-        extract
-            (field "film"
-                [ ( "filmID", Arg.variable filmID ) ]
-                (object FilmSummary
-                    |> with (field "title" [] (nullable string))
-                    |> with
-                        (field "characterConnection"
-                            [ ( "first", Arg.variable pageSize ) ]
-                            (connectionNodes (extract (field "name" [] (nullable string))))
-                        )
-                    |> with (fragmentSpread planetsFragment)
-                )
+    extract
+        (field "film"
+            [ ( "filmID", Arg.variable filmID ) ]
+            (object FilmSummary
+                |> with (field "title" [] (nullable string))
+                |> with
+                    (field "characterConnection"
+                        [ ( "first", Arg.variable pageSize ) ]
+                        (connectionNodes (extract (field "name" [] (nullable string))))
+                    )
+                |> with (fragmentSpread planetsFragment)
             )
-            |> queryDocument
-            |> request
-                { filmID = "1"
-                , pageSize = Nothing
-                }
+        )
+        |> queryDocument
+        |> request
+            { filmID = "1"
+            , pageSize = Nothing
+            }
 
 
 {-| A function that helps you extract node objects from paginated Relay connections.
@@ -103,27 +102,32 @@ connectionNodes spec =
         )
 
 
-type alias StarWarsResponse =
-    Result GraphQLClient.Error FilmSummary
-
-
 type alias Model =
-    Maybe StarWarsResponse
+    Maybe FilmSummary
 
 
 type Msg
-    = ReceiveQueryResponse StarWarsResponse
+    = ReceiveQueryResponse FilmSummary
+    | ReceiveQueryError
 
 
-sendQueryRequest : Request Query a -> Task GraphQLClient.Error a
+graphQLToMsg : GraphQLClient.Result FilmSummary -> Msg
+graphQLToMsg result =
+    case result of
+        GraphQLClient.GraphQLSucces data ->
+            ReceiveQueryResponse data
+
+        -- Explicitly ignoring GraphQL data
+        GraphQLClient.GraphQLErrors _ _ ->
+            ReceiveQueryError
+
+        GraphQLClient.HttpError _ ->
+            ReceiveQueryError
+
+
+sendQueryRequest : Request Query FilmSummary -> Cmd Msg
 sendQueryRequest request =
-    GraphQLClient.sendQuery "/" request
-
-
-sendStarWarsQuery : Cmd Msg
-sendStarWarsQuery =
-    sendQueryRequest starWarsRequest
-        |> Task.attempt ReceiveQueryResponse
+    GraphQLClient.sendQuery "/" graphQLToMsg request
 
 
 main : Program () Model Msg
@@ -138,16 +142,55 @@ main =
 
 init : () -> ( Model, Cmd Msg )
 init () =
-    ( Nothing, sendStarWarsQuery )
+    ( Nothing, sendQueryRequest starWarsRequest )
 
 
 view : Model -> Browser.Document Msg
 view model =
     { title = "Example"
-    , body = [ model |> Debug.toString |> text ]
+    , body =
+        [ Maybe.map viewFilmSummary model |> Maybe.withDefault (Html.text "Nothing") ]
     }
 
 
+viewFilmSummary : FilmSummary -> Html Msg
+viewFilmSummary summary =
+    Html.div []
+        [ Html.text ("Title: " ++ Maybe.withDefault "Unknown" summary.title)
+        , viewCharacterNames summary.someCharacterNames
+        , viewPlanetNames <| Maybe.withDefault [] summary.somePlanetNames
+        ]
+
+
+viewCharacterNames : List (Maybe String) -> Html Msg
+viewCharacterNames names =
+    Html.div []
+        [ Html.text "Character names: "
+        , viewNameList names
+        ]
+
+
+viewPlanetNames : List (Maybe String) -> Html Msg
+viewPlanetNames names =
+    Html.div []
+        [ Html.text "Planet names: "
+        , viewNameList names
+        ]
+
+
+viewNameList : List (Maybe String) -> Html Msg
+viewNameList names =
+    names
+        |> List.map (Maybe.withDefault " -- ")
+        |> String.join ", "
+        |> Html.text
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
-update (ReceiveQueryResponse response) model =
-    ( Just response, Cmd.none )
+update msg model =
+    case msg of
+        ReceiveQueryResponse data ->
+            ( Just data, Cmd.none )
+
+        ReceiveQueryError ->
+            ( Nothing, Cmd.none )
